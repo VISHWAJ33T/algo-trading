@@ -1,0 +1,595 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Nifty Bot Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg: #f5f6f8;
+    --card: #ffffff;
+    --border: #e5e7eb;
+    --text: #1f2430;
+    --muted: #6b7280;
+    --accent: #2563eb;
+    --green: #16a34a;
+    --red: #dc2626;
+    --ce: #2563eb;
+    --pe: #d97706;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+  }
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 18px 28px;
+    background: var(--card);
+    border-bottom: 1px solid var(--border);
+    position: sticky;
+    top: 0;
+    z-index: 10;
+  }
+  header h1 { font-size: 18px; margin: 0; font-weight: 600; }
+  .status-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+    padding: 5px 12px;
+    border-radius: 999px;
+    background: #f3f4f6;
+    color: var(--muted);
+  }
+  .status-pill.live { background: #dcfce7; color: #15803d; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+  .dot.blink { animation: blink 1.4s infinite; }
+  @keyframes blink { 50% { opacity: 0.35; } }
+
+  nav.tabs {
+    display: flex;
+    gap: 4px;
+    padding: 12px 28px 0;
+    background: var(--card);
+    border-bottom: 1px solid var(--border);
+  }
+  nav.tabs button {
+    border: none;
+    background: none;
+    padding: 10px 18px;
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--muted);
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+  }
+  nav.tabs button.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+  main { padding: 24px 28px 60px; max-width: 1180px; margin: 0 auto; }
+  .tab-panel { display: none; }
+  .tab-panel.active { display: block; }
+
+  .grid { display: grid; gap: 16px; }
+  .grid.cards { grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); margin-bottom: 20px; }
+
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 18px 20px;
+  }
+  .card .label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; margin-bottom: 6px; }
+  .card .value { font-size: 26px; font-weight: 700; }
+  .card .value.pos { color: var(--green); }
+  .card .value.neg { color: var(--red); }
+
+  section.panel { margin-bottom: 24px; }
+  section.panel h2 { font-size: 15px; margin: 0 0 12px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .03em; }
+
+  .chart-card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 16px; height: 320px; }
+
+  .chart-controls { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+  .series-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 5px 14px 5px 10px;
+    font-size: 13px;
+    user-select: none;
+  }
+  .series-toggle.off { opacity: .45; }
+  .series-toggle.warming { border-style: dashed; }
+  .series-toggle .hint { font-size: 11px; color: var(--muted); font-style: italic; }
+  .series-toggle input[type=checkbox] { margin: 0; cursor: pointer; }
+  .series-toggle .name { cursor: pointer; font-weight: 500; }
+  .series-toggle input[type=color] {
+    width: 24px; height: 24px; padding: 0;
+    border: 1px solid var(--border); border-radius: 6px;
+    background: none; cursor: pointer;
+  }
+  .series-toggle input[type=color]::-webkit-color-swatch-wrapper { padding: 2px; }
+  .series-toggle input[type=color]::-webkit-color-swatch { border: none; border-radius: 4px; }
+  .series-toggle input[type=color]::-moz-color-swatch { border: none; border-radius: 4px; }
+  .chart-reset { border: none; background: none; color: var(--muted); font-size: 12px; cursor: pointer; text-decoration: underline; padding: 0 6px; }
+  .chart-note { font-size: 12px; color: var(--muted); margin: -4px 0 10px; display: none; }
+
+  table { width: 100%; border-collapse: collapse; background: var(--card); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; font-size: 13px; }
+  th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .03em; background: #fafafa; }
+  tr:last-child td { border-bottom: none; }
+  .empty-row td { text-align: center; color: var(--muted); padding: 24px; }
+
+  .badge { display: inline-block; padding: 2px 9px; border-radius: 6px; font-size: 12px; font-weight: 600; }
+  .badge.CE { background: #dbeafe; color: var(--ce); }
+  .badge.PE { background: #fef3c7; color: var(--pe); }
+  .pnl.pos { color: var(--green); font-weight: 600; }
+  .pnl.neg { color: var(--red); font-weight: 600; }
+
+  .open-position-card { border-left: 4px solid var(--accent); }
+  .filters { display: flex; gap: 10px; align-items: center; margin-bottom: 16px; flex-wrap: wrap; }
+  .filters input { padding: 7px 10px; border: 1px solid var(--border); border-radius: 8px; font-size: 13px; }
+  .filters button { padding: 7px 16px; border: none; background: var(--accent); color: white; border-radius: 8px; font-size: 13px; cursor: pointer; font-weight: 500; }
+  .filters button:hover { background: #1d4ed8; }
+  .muted { color: var(--muted); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Nifty CE/PE Bot</h1>
+  <span id="status-pill" class="status-pill"><span class="dot"></span><span id="status-text">Checking…</span></span>
+</header>
+
+<nav class="tabs">
+  <button class="tab-btn active" data-tab="today">Today</button>
+  <button class="tab-btn" data-tab="history">History</button>
+</nav>
+
+<main>
+  <!-- TODAY TAB -->
+  <div id="tab-today" class="tab-panel active">
+    <div class="grid cards">
+      <div class="card"><div class="label">Today's P&amp;L</div><div class="value" id="today-pnl">--</div></div>
+      <div class="card"><div class="label">Trades Today</div><div class="value" id="today-count">--</div></div>
+      <div class="card"><div class="label">Open Position</div><div class="value" id="today-open-summary" style="font-size:16px;">None</div></div>
+    </div>
+
+    <div id="open-position-section" style="display:none;" class="panel">
+      <h2>Open Position</h2>
+      <div class="card open-position-card" id="open-position-card"></div>
+    </div>
+
+    <section class="panel">
+      <h2>Underlying Price &amp; Indicators (5-min)</h2>
+      <div class="chart-controls" id="chart-controls"></div>
+      <div class="chart-note" id="chart-note"></div>
+      <div class="chart-card"><canvas id="chart-today"></canvas></div>
+    </section>
+
+    <section class="panel">
+      <h2>Today's Trades</h2>
+      <table id="today-trades-table">
+        <thead><tr><th>Entry</th><th>Type</th><th>Symbol</th><th>Qty</th><th>Entry ₹</th><th>Exit ₹</th><th>P&amp;L</th><th>Exit Reason</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </section>
+
+    <section class="panel">
+      <h2>Recent Decisions</h2>
+      <table id="decisions-table">
+        <thead><tr><th>Time</th><th>Action</th><th>Type</th><th>Close</th><th>VWAP</th><th>Force Idx</th><th>Reason</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </section>
+  </div>
+
+  <!-- HISTORY TAB -->
+  <div id="tab-history" class="tab-panel">
+    <div class="filters">
+      <label class="muted">From <input type="date" id="hist-start"></label>
+      <label class="muted">To <input type="date" id="hist-end"></label>
+      <button id="hist-load">Load</button>
+    </div>
+
+    <div class="grid cards">
+      <div class="card"><div class="label">Total P&amp;L</div><div class="value" id="hist-pnl">--</div></div>
+      <div class="card"><div class="label">Win Rate</div><div class="value" id="hist-winrate">--</div></div>
+      <div class="card"><div class="label">Wins / Losses</div><div class="value" id="hist-wl" style="font-size:20px;">--</div></div>
+      <div class="card"><div class="label">Total Trades</div><div class="value" id="hist-total">--</div></div>
+    </div>
+
+    <section class="panel">
+      <h2>Daily P&amp;L</h2>
+      <div class="chart-card"><canvas id="chart-daily-pnl"></canvas></div>
+    </section>
+
+    <section class="panel">
+      <h2>Equity Curve (Cumulative P&amp;L)</h2>
+      <div class="chart-card"><canvas id="chart-equity"></canvas></div>
+    </section>
+
+    <section class="panel">
+      <h2>All Trades</h2>
+      <table id="hist-trades-table">
+        <thead><tr><th>Date</th><th>Entry</th><th>Type</th><th>Symbol</th><th>Qty</th><th>Entry ₹</th><th>Exit ₹</th><th>P&amp;L</th><th>Mode</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </section>
+  </div>
+</main>
+
+<script>
+const fmtMoney = (n) => (n === null || n === undefined) ? '--' : '₹' + Number(n).toLocaleString('en-IN', {maximumFractionDigits: 2});
+const fmtTime = (iso) => iso ? new Date(iso).toLocaleTimeString('en-IN', {hour: '2-digit', minute: '2-digit'}) : '--';
+const fmtDateTime = (iso) => iso ? new Date(iso).toLocaleString('en-IN', {day:'2-digit', month:'short', hour:'2-digit', minute:'2-digit'}) : '--';
+const pnlClass = (n) => (n === null || n === undefined) ? '' : (n >= 0 ? 'pos' : 'neg');
+const num = (n, d=2) => (n === null || n === undefined) ? '--' : Number(n).toFixed(d);
+
+let todayChart, dailyPnlChart, equityChart;
+
+// Series drawn on the 5-min indicator chart. `axis: 'yFI'` puts Force Index on
+// its own right-hand scale -- it is orders of magnitude larger than price, so
+// sharing the price axis would flatten every other line into a straight line.
+// `minBars` is how many 5-min candles the indicator needs before it produces a
+// single value: EMA needs its full period to seed, and Force Index needs one
+// extra bar on top of its 13-period EMA because bar 0 has no previous close.
+// Until then the series is legitimately empty, and the legend says so rather
+// than leaving you wondering why a line is missing.
+const CHART_SERIES = [
+  { key: 'close',       label: 'Close',       color: '#2563eb', axis: 'y',   minBars: 1 },
+  { key: 'vwap',        label: 'VWAP',        color: '#f59e0b', axis: 'y',   minBars: 1,  dash: [5, 4] },
+  { key: 'ema9',        label: 'EMA 9',       color: '#16a34a', axis: 'y',   minBars: 9 },
+  { key: 'ema15',       label: 'EMA 15',      color: '#a855f7', axis: 'y',   minBars: 15 },
+  { key: 'force_index', label: 'Force Index', color: '#0891b2', axis: 'yFI', minBars: 14, dash: [2, 3] },
+];
+const FI_SERIES = CHART_SERIES.find(s => s.key === 'force_index');
+const PREFS_KEY = 'nifty-bot.chart-series';
+
+let seriesPrefs = (() => {
+  try { return JSON.parse(localStorage.getItem(PREFS_KEY)) || {}; } catch (e) { return {}; }
+})();
+
+function savePrefs() {
+  try { localStorage.setItem(PREFS_KEY, JSON.stringify(seriesPrefs)); } catch (e) { /* private mode */ }
+}
+function prefFor(s) {
+  const p = seriesPrefs[s.key] || {};
+  return { color: p.color || s.color, visible: p.visible !== false };
+}
+function setPref(key, patch) {
+  seriesPrefs[key] = Object.assign({}, seriesPrefs[key], patch);
+  savePrefs();
+}
+
+const isBlank = v => v === null || v === undefined;
+const countPoints = arr => arr.reduce((n, v) => isBlank(v) ? n : n + 1, 0);
+
+// A line needs two points to draw anything, and a two-point run is a hairline
+// stub in the corner -- so an indicator that has only just seeded is invisible
+// with the zero-radius markers the dense lines want. Draw markers when a series
+// is still that sparse, and on any point isolated between two gaps.
+function pointRadiusFor(ctx) {
+  const data = ctx.dataset.data || [];
+  if (isBlank(data[ctx.dataIndex])) return 0;
+  if (countPoints(data) <= 4) return 3;
+  const lonely = isBlank(data[ctx.dataIndex - 1]) && isBlank(data[ctx.dataIndex + 1]);
+  return lonely ? 3 : 0;
+}
+
+function applySeriesStyles() {
+  if (!todayChart) return;
+  CHART_SERIES.forEach((s, i) => {
+    const pref = prefFor(s);
+    const ds = todayChart.data.datasets[i];
+    ds.borderColor = pref.color;
+    ds.backgroundColor = pref.color;
+    ds.pointBackgroundColor = pref.color;
+    ds.pointBorderColor = pref.color;
+    ds.hidden = !pref.visible;
+  });
+  // Only show the Force Index axis while that series is actually on screen.
+  todayChart.options.scales.yFI.display = prefFor(FI_SERIES).visible;
+  todayChart.update();
+}
+
+let barCount = 0;
+
+// Spell out *why* a line is absent: an indicator with no values yet is warming
+// up, not broken. Bar counts come from the loaded session, so this stays right
+// as the session grows.
+function updateSeriesHints() {
+  CHART_SERIES.forEach(s => {
+    const wrap = document.querySelector(`#chart-controls [data-series="${s.key}"]`);
+    if (!wrap) return;
+    const hint = wrap.querySelector('.hint');
+    const short = barCount > 0 && barCount < s.minBars;
+    hint.textContent = short ? `needs ${s.minBars} bars, have ${barCount}` : '';
+    hint.style.display = short ? '' : 'none';
+    wrap.classList.toggle('warming', short);
+  });
+}
+
+function buildChartControls() {
+  const host = document.getElementById('chart-controls');
+  host.innerHTML = '';
+
+  CHART_SERIES.forEach(s => {
+    const pref = prefFor(s);
+    const wrap = document.createElement('span');
+    wrap.className = 'series-toggle' + (pref.visible ? '' : ' off');
+    wrap.dataset.series = s.key;
+
+    const check = document.createElement('input');
+    check.type = 'checkbox';
+    check.checked = pref.visible;
+    check.title = 'Show / hide ' + s.label;
+
+    const color = document.createElement('input');
+    color.type = 'color';
+    color.value = pref.color;
+    color.title = 'Pick the ' + s.label + ' line colour';
+
+    const name = document.createElement('span');
+    name.className = 'name';
+    name.textContent = s.label;
+
+    const hint = document.createElement('span');
+    hint.className = 'hint';
+    hint.style.display = 'none';
+
+    const toggle = () => {
+      check.checked = !check.checked;
+      check.dispatchEvent(new Event('change'));
+    };
+    check.addEventListener('change', () => {
+      setPref(s.key, { visible: check.checked });
+      wrap.classList.toggle('off', !check.checked);
+      applySeriesStyles();
+    });
+    color.addEventListener('input', () => {
+      setPref(s.key, { color: color.value });
+      applySeriesStyles();
+    });
+    name.addEventListener('click', toggle);
+
+    wrap.append(check, color, name, hint);
+    host.appendChild(wrap);
+  });
+
+  updateSeriesHints();
+
+  const reset = document.createElement('button');
+  reset.className = 'chart-reset';
+  reset.textContent = 'Reset colours';
+  reset.addEventListener('click', () => {
+    seriesPrefs = {};
+    savePrefs();
+    buildChartControls();
+    applySeriesStyles();
+  });
+  host.appendChild(reset);
+}
+
+function switchTab(name) {
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === name));
+  document.querySelectorAll('.tab-panel').forEach(p => p.classList.toggle('active', p.id === 'tab-' + name));
+  if (name === 'history') loadHistory();
+}
+document.querySelectorAll('.tab-btn').forEach(btn => btn.addEventListener('click', () => switchTab(btn.dataset.tab)));
+
+async function loadToday() {
+  const res = await fetch('/api/today');
+  const data = await res.json();
+
+  const pill = document.getElementById('status-pill');
+  const statusText = document.getElementById('status-text');
+  if (data.is_live_now) {
+    pill.classList.add('live');
+    statusText.textContent = 'Bot Active';
+    pill.querySelector('.dot').classList.add('blink');
+  } else {
+    pill.classList.remove('live');
+    statusText.textContent = 'Not Running';
+    pill.querySelector('.dot').classList.remove('blink');
+  }
+
+  const pnlEl = document.getElementById('today-pnl');
+  pnlEl.textContent = fmtMoney(data.todays_pnl);
+  pnlEl.className = 'value ' + pnlClass(data.todays_pnl);
+  document.getElementById('today-count').textContent = data.trades.length;
+
+  const openSection = document.getElementById('open-position-section');
+  const openSummary = document.getElementById('today-open-summary');
+  if (data.open_position) {
+    const p = data.open_position;
+    openSection.style.display = 'block';
+    openSummary.innerHTML = `<span class="badge ${p.option_type}">${p.option_type}</span>`;
+    document.getElementById('open-position-card').innerHTML = `
+      <div style="display:flex; justify-content:space-between; flex-wrap:wrap; gap:12px;">
+        <div><div class="label">Symbol</div><div style="font-weight:600;">${p.trading_symbol}</div></div>
+        <div><div class="label">Quantity</div><div style="font-weight:600;">${p.quantity}</div></div>
+        <div><div class="label">Entry Price</div><div style="font-weight:600;">${fmtMoney(p.entry_price)}</div></div>
+        <div><div class="label">Entry Time</div><div style="font-weight:600;">${fmtTime(p.entry_time)}</div></div>
+        <div><div class="label">Mode</div><div style="font-weight:600;">${p.live_trading ? 'LIVE' : 'Paper'}</div></div>
+      </div>`;
+  } else {
+    openSection.style.display = 'none';
+    openSummary.textContent = 'None';
+  }
+
+  const tbody = document.querySelector('#today-trades-table tbody');
+  tbody.innerHTML = data.trades.length ? data.trades.map(t => `
+    <tr>
+      <td>${fmtTime(t.entry_time)}</td>
+      <td><span class="badge ${t.option_type}">${t.option_type}</span></td>
+      <td>${t.trading_symbol}</td>
+      <td>${t.quantity}</td>
+      <td>${fmtMoney(t.entry_price)}</td>
+      <td>${fmtMoney(t.exit_price)}</td>
+      <td class="pnl ${pnlClass(t.pnl)}">${t.pnl !== null ? fmtMoney(t.pnl) : 'Open'}</td>
+      <td class="muted">${t.exit_reason || '--'}</td>
+    </tr>`).join('') : `<tr class="empty-row"><td colspan="8">No trades yet today.</td></tr>`;
+
+  const dtbody = document.querySelector('#decisions-table tbody');
+  dtbody.innerHTML = data.recent_decisions.length ? data.recent_decisions.map(d => `
+    <tr>
+      <td>${fmtTime(d.timestamp)}</td>
+      <td>${d.action}</td>
+      <td>${d.option_type ? `<span class="badge ${d.option_type}">${d.option_type}</span>` : '--'}</td>
+      <td>${num(d.close)}</td>
+      <td>${num(d.vwap)}</td>
+      <td>${num(d.force_index)}</td>
+      <td class="muted">${d.reason || '--'}</td>
+    </tr>`).join('') : `<tr class="empty-row"><td colspan="7">No decisions logged yet today.</td></tr>`;
+
+  const labels = data.candles_5m.map(c => fmtTime(c.start_time));
+  // `?? null` matters: Chart.js treats undefined as "no point" but null as a
+  // gap, and spanGaps below bridges the indicator warm-up nulls at the start.
+  const seriesData = key => data.candles_5m.map(c => c[key] ?? null);
+
+  barCount = data.candles_5m.length;
+
+  const note = document.getElementById('chart-note');
+  if (data.vwap_is_fallback) {
+    note.style.display = 'block';
+    note.textContent = 'Heads up: the feed reported no volume for this session, so VWAP is shown as cumulative typical price (H+L+C)/3.';
+  } else {
+    note.style.display = 'none';
+  }
+
+  if (!todayChart) {
+    todayChart = new Chart(document.getElementById('chart-today'), {
+      type: 'line',
+      data: {
+        labels,
+        datasets: CHART_SERIES.map(s => {
+          const pref = prefFor(s);
+          return {
+            label: s.label,
+            data: seriesData(s.key),
+            borderColor: pref.color,
+            backgroundColor: pref.color,
+            borderDash: s.dash || [],
+            yAxisID: s.axis,
+            hidden: !pref.visible,
+            borderWidth: 2,
+            tension: 0.2,
+            pointRadius: pointRadiusFor,
+            pointBackgroundColor: pref.color,
+            pointBorderColor: pref.color,
+            spanGaps: true,
+          };
+        }),
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        interaction: { mode: 'index', intersect: false },
+        plugins: {
+          legend: { display: false },
+          tooltip: { callbacks: { label: ctx => `${ctx.dataset.label}: ${ctx.parsed.y === null ? '--' : num(ctx.parsed.y)}` } },
+        },
+        scales: {
+          y: { position: 'left' },
+          yFI: {
+            position: 'right',
+            display: prefFor(FI_SERIES).visible,
+            grid: { drawOnChartArea: false },
+            title: { display: true, text: 'Force Index' },
+          },
+        },
+      },
+    });
+    buildChartControls();
+  } else {
+    todayChart.data.labels = labels;
+    CHART_SERIES.forEach((s, i) => { todayChart.data.datasets[i].data = seriesData(s.key); });
+    updateSeriesHints();
+    todayChart.update();
+  }
+}
+
+async function loadHistory() {
+  const start = document.getElementById('hist-start').value;
+  const end = document.getElementById('hist-end').value;
+  const params = new URLSearchParams();
+  if (start) params.set('start', start);
+  if (end) params.set('end', end);
+
+  const res = await fetch('/api/history?' + params.toString());
+  const data = await res.json();
+
+  document.getElementById('hist-start').value = data.start_date;
+  document.getElementById('hist-end').value = data.end_date;
+
+  const s = data.summary;
+  const pnlEl = document.getElementById('hist-pnl');
+  pnlEl.textContent = fmtMoney(s.total_pnl);
+  pnlEl.className = 'value ' + pnlClass(s.total_pnl);
+  document.getElementById('hist-winrate').textContent = s.total_trades ? s.win_rate.toFixed(0) + '%' : '--';
+  document.getElementById('hist-wl').textContent = `${s.wins} / ${s.losses}`;
+  document.getElementById('hist-total').textContent = s.total_trades;
+
+  const days = data.daily_summary.map(d => d.session_date);
+  const dayPnls = data.daily_summary.map(d => d.total_pnl);
+  const barColors = dayPnls.map(v => v >= 0 ? '#16a34a' : '#dc2626');
+
+  if (!dailyPnlChart) {
+    dailyPnlChart = new Chart(document.getElementById('chart-daily-pnl'), {
+      type: 'bar',
+      data: { labels: days, datasets: [{ label: 'Daily P&L', data: dayPnls, backgroundColor: barColors }] },
+      options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } } },
+    });
+  } else {
+    dailyPnlChart.data.labels = days;
+    dailyPnlChart.data.datasets[0].data = dayPnls;
+    dailyPnlChart.data.datasets[0].backgroundColor = barColors;
+    dailyPnlChart.update();
+  }
+
+  let cumulative = 0;
+  const equity = dayPnls.map(v => cumulative += v);
+
+  if (!equityChart) {
+    equityChart = new Chart(document.getElementById('chart-equity'), {
+      type: 'line',
+      data: { labels: days, datasets: [{ label: 'Cumulative P&L', data: equity, borderColor: '#2563eb', backgroundColor: 'rgba(37,99,235,0.08)', fill: true, tension: 0.15, pointRadius: 2 }] },
+      options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } } },
+    });
+  } else {
+    equityChart.data.labels = days;
+    equityChart.data.datasets[0].data = equity;
+    equityChart.update();
+  }
+
+  const tbody = document.querySelector('#hist-trades-table tbody');
+  tbody.innerHTML = data.trades.length ? data.trades.map(t => `
+    <tr>
+      <td>${t.session_date}</td>
+      <td>${fmtDateTime(t.entry_time)}</td>
+      <td><span class="badge ${t.option_type}">${t.option_type}</span></td>
+      <td>${t.trading_symbol}</td>
+      <td>${t.quantity}</td>
+      <td>${fmtMoney(t.entry_price)}</td>
+      <td>${fmtMoney(t.exit_price)}</td>
+      <td class="pnl ${pnlClass(t.pnl)}">${t.pnl !== null ? fmtMoney(t.pnl) : 'Open'}</td>
+      <td class="muted">${t.live_trading ? 'LIVE' : 'Paper'}</td>
+    </tr>`).join('') : `<tr class="empty-row"><td colspan="9">No trades in this range.</td></tr>`;
+}
+
+document.getElementById('hist-load').addEventListener('click', loadHistory);
+
+loadToday();
+setInterval(loadToday, 8000);
+</script>
+</body>
+</html>

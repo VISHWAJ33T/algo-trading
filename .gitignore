@@ -1,0 +1,18 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+logs/
+data/
+.pytest_cache/
+
+# Editor / OS local settings
+.vscode/
+
+# Client session captures and working notes -- never commit these, they
+# contain a specific trading account's live data.
+debug-data/
+debug-logs/
+*.docx
+.~lock.*#
+tmp2/

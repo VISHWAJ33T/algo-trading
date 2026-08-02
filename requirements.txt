@@ -1,0 +1,5 @@
+git+https://github.com/Kotak-Neo/Kotak-neo-api-v2.git@v2.0.2#egg=neo_api_client
+pyotp>=2.9
+python-dotenv>=1.0
+pytest>=8.0
+flask>=3.0
