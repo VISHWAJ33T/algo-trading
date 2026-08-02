@@ -64,6 +64,30 @@ minutes, for as long as it's running.
 - **Exit a CE** when price closes below VWAP, **or** Force Index goes below zero.
 - **Exit a PE** when price closes above VWAP, **or** Force Index goes above zero.
 
+### 3a. Revised rules after the 30-Jul-2026 review
+
+Reviewing that session's log, your client found three signals the bot skipped and
+two entries it should not have taken. The rules below supersede the ones above
+wherever they differ; section 9a explains what in the code produced each case.
+
+- **Entry is a VWAP *cross*, not a VWAP *side***. A CE is taken on the green candle
+  that carries price from at/below VWAP to above it — never while price is already
+  parked above VWAP. PE is the mirror (red candle crossing down). This is the
+  single biggest change: it is what rules out the 13:45 and 15:10 entries.
+- **Trend is read as "not making lower lows"**, on the ordinary 3-bar pivot, rather
+  than demanding a simultaneous higher high *and* higher low confirmed two bars
+  late. A pullback inside an uptrend still counts as an uptrend.
+- **The 30-min chart no longer gates entry.** It is still computed, logged and
+  charted, but requiring it to confirm blocked the valid 12:25 signal — the 30-min
+  structure was still carrying that morning's lower low while the 5-min chart had
+  already turned. Entry is now a 5-min decision.
+- **ATM strike comes from the NIFTY 50 spot index**, not from Nifty Futures. At
+  12:25 on 30-Jul futures were 24315 while spot was 24264.05 — a full strike apart,
+  so the bot was buying 24300 CE where the strategy calls for 24250 CE.
+- **Profit target**: 30 points of the underlying, which at an ATM delta of ~0.5 is
+  about 15 points of premium; whichever is reached first closes the position. Both
+  are configurable in `.env`.
+
 Everything else in this document is about *how* that recipe gets executed by software
 against Kotak's platform, and the real-world constraints that shaped the "how."
 
@@ -209,16 +233,16 @@ start, a cheap always-on cloud server later if desired).
 
 | File | Plain-English role |
 |---|---|
-| `config.py` | Reads all settings from a `.env` file — credentials, whether to place real orders or just log them, lot size, daily loss limit. |
+| `config.py` | Reads all settings from a `.env` file — credentials, whether to place real orders or just log them, lot size, daily loss limit, profit target. |
 | `auth.py` | Logs into Kotak (mobile number + UCC + an auto-generated 6-digit TOTP code + MPIN). Also wraps every API call so that if a call fails in a way that looks like the session expired, it logs in again and retries once automatically. |
-| `instruments.py` | Figures out *which exact contract* to trade: "the current Nifty Futures contract" and "the ATM Call/Put for the current price," using Kotak's built-in `search_scrip()` lookup (see section 9 for why this changed from an earlier version). Also fetches a live price for a specific contract. |
+| `instruments.py` | Figures out *which exact contract* to trade: the current Nifty Futures contract (whose ticks build the candles), the NIFTY 50 spot index (whose level picks the ATM strike — see section 3a), and the ATM Call/Put itself, using Kotak's built-in `search_scrip()` lookup (see section 9 for why this changed from an earlier version). Also fetches a live price for a specific contract. |
 | `candles.py` | Takes a stream of individual trade ticks and groups them into 5-minute and 30-minute OHLCV candles — this is the code that replaces the "historical data" Kotak doesn't provide, by building the chart ourselves in real time. |
 | `indicators.py` | Pure maths: given a list of candles, compute VWAP, EMA, Elder's Force Index, and detect Higher-High/Higher-Low (or Lower-High/Lower-Low) chart structure. No network calls — this is why it can be unit-tested without touching Kotak or the market at all. |
-| `strategy.py` | Encodes your client's exact rules from section 3: given the current indicator values and structure, decide "enter CE," "enter PE," "exit," or "do nothing." |
+| `strategy.py` | Encodes your client's exact rules from sections 3 and 3a: given the closed candle and its indicator values, decide "enter CE," "enter PE," "exit," or "do nothing." When it holds, it records *which* condition blocked the entry, so a decision can be checked against a chart afterwards. |
 | `risk.py` | Guardrails: won't open a second position while one is already open, and (once configured) will stop taking new trades if the day's losses cross a limit you set. |
 | `execution.py` | Actually acts on a decision: buys/sells the resolved contract. Controlled entirely by one on/off switch (`LIVE_TRADING`) — when off, it only logs what it *would* have done and tracks a simulated profit/loss; when on, it calls Kotak's real order-placement API. Both modes run through identical logic otherwise. |
 | `ws_feed.py` | The plumbing between Kotak's live data feed and `candles.py` — receives raw tick messages and hands clean (price, volume, time) values onward. |
-| `main.py` | Wires everything above together and runs the whole day: log in → find contracts → start the feed → react to every 5-min candle close → square off any open position before market close → stop. |
+| `main.py` | Wires everything above together and runs the whole day: log in → find contracts → start the feed → react to every 5-min candle close → watch the profit target between closes → square off any open position before market close → stop the feed. |
 | `logging_config.py` | Sends a copy of everything the bot does to both the screen and a daily log file (`logs/bot.log`), so a session can be reviewed afterward. |
 | `storage.py` | Saves every candle, decision, and trade into a local SQLite database file (`data/bot.db`) as the bot runs — this is what section 10's dashboard reads from. |
 | `dashboard.py` + `templates/dashboard.html` | A small, separate web page (run with `python -m src.dashboard`) that reads `data/bot.db` and shows it in a clean, non-technical view — see section 10. |
@@ -268,6 +292,43 @@ facts:
   product, transaction type, validity) were cross-checked against the SDK's own
   internal validation rules (`req_data_validation.py`) and confirmed correct as
   originally written.
+
+### 9a. What the 30-Jul-2026 session review turned up
+
+Five complaints, four underlying defects. All five cases are now covered by tests
+(`tests/test_strategy.py`), and replaying that day's recorded candles through the
+fixed engine reproduces exactly the behaviour your client asked for.
+
+1. **Decisions were being made on the wrong candle.** `handle_5m_close` evaluated
+   `all_candles()`, which ends with the *next* candle — a bar holding a single
+   tick, opened microseconds earlier. So every signal was judged on the first
+   print of the next candle instead of the close of the candle that just
+   finished. Visible in the recorded data: the 13:50 decision logged
+   `close=24345.00`, which is the 13:50 candle's opening tick, while the 13:45
+   candle it was meant to judge had closed at 24348.50. Fixed by adding
+   `TickAggregator.closed_candles()` and evaluating on that.
+2. **No VWAP-cross requirement.** The rule was implemented as `close > VWAP`, so
+   any candle in a trend that had long since crossed VWAP kept qualifying. That
+   is the 13:45 entry (price 27 points above VWAP, opened above it) and the 15:10
+   entry (which was additionally a *red* candle). Fixed in
+   `strategy._vwap_cross`, plus an explicit green/red requirement.
+3. **Market structure was too strict to ever fire.** The old rule wanted a
+   confirmed higher high *and* higher low from 2-bar fractals. On 30-Jul the
+   30-min structure came back `None` for the entire session, and the 5-min
+   structure was `None` at 14:35 and `LH_LL` at 11:10 — so three valid signals
+   were held. `indicators.swing_structure` now reads the trend the way a chart
+   does, and the 30-min timeframe no longer gates entry.
+4. **Nothing stopped the bot at the close.** Entries were taken at 15:25 and
+   15:30 — after the 15:20 square-off — and the 15:30 one was never closed at
+   all. Meanwhile the websocket kept reconnecting and aggregating stale
+   post-close prints into flat zero-volume candles until 19:40. Fixed with
+   `candles.in_session` (ticks outside 09:15–15:30 build no candles), an entry
+   cut-off at the square-off time, a square-off that retries instead of latching
+   after one attempt, and `LiveFeed.stop()`.
+
+Replayed on the recorded 30-Jul candles, the fixed engine takes the 11:10, 12:25
+and 14:35 entries, skips 13:45 and 15:10, and closes two of the four trades on the
++30-point target.
 
 ### What's still an assumption (worth checking on the first real run)
 
@@ -410,6 +471,9 @@ before ever considering flipping it live.
 1. Set real numbers for `LOT_SIZE` and `MAX_DAILY_LOSS` in `.env` — the strategy
    your client gave you doesn't specify these, so this is a business decision
    (yours or your client's) about how much capital/risk to put behind each signal.
+   `TARGET_UNDERLYING_POINTS` (30) and `TARGET_PREMIUM_POINTS` (15) ship with the
+   values from section 3a; either can be blanked out to disable that half of the
+   target check.
 2. Set `LIVE_TRADING=true`.
 3. Run it again. From this point, every "enter"/"exit" decision places a real order
    on the account.

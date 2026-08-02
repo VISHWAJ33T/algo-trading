@@ -122,3 +122,40 @@ def test_swing_structure_detects_lower_high_lower_low():
 def test_swing_structure_none_without_enough_confirmed_points():
     candles = [make_candle(i * 5, 100, 101, 99, 100, 10) for i in range(3)]
     assert swing_structure(candles, n=2) is None
+
+
+def test_swing_structure_reads_a_pullback_as_still_trending_up():
+    # Higher low, but the last swing high is *lower* than the previous one --
+    # an ordinary pullback inside an uptrend. The old rule called this "no
+    # structure" and refused to trade it; the trend is up while price is not
+    # making lower lows.
+    highs = [10, 30, 12, 14, 25, 13, 15, 16]
+    lows = [5, 8, 1, 9, 20, 7, 11, 12]
+    candles = _build_candles(highs, lows)
+
+    points = find_swing_points(candles, n=1)
+    assert [p[2] for p in points if p[1] == "high"][-2:] == [30, 25]  # lower high
+    assert [p[2] for p in points if p[1] == "low"][-2:] == [1, 7]  # higher low
+
+    assert swing_structure(candles, n=1) == "HH_HL"
+
+
+def test_swing_structure_reads_lower_lows_as_trending_down():
+    # Lower high (30 -> 25) and lower low (3 -> -5).
+    highs = [10, 30, 12, 14, 25, 13, 15, 16]
+    lows = [5, 8, 3, 9, 20, -5, 11, 12]
+    candles = _build_candles(highs, lows)
+    assert swing_structure(candles, n=1) == "LH_LL"
+
+
+def test_swing_structure_defaults_to_the_three_bar_pivot():
+    # Default fractal width is 1 (a 3-bar pivot), which is what a trader reads
+    # off the chart. n=2 needs two bars of confirmation either side, so on
+    # swings this short it sees no structure at all.
+    highs = [10, 30, 12, 25, 11, 13]
+    lows = [5, 8, 1, 9, -5, 12]
+    candles = _build_candles(highs, lows)
+
+    assert swing_structure(candles) == "LH_LL"
+    assert swing_structure(candles) == swing_structure(candles, n=1)
+    assert swing_structure(candles, n=2) is None

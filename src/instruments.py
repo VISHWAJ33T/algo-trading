@@ -31,13 +31,26 @@ from src.auth import KotakSession
 logger = logging.getLogger(__name__)
 
 
+# NIFTY 50 spot index, cash segment. Strike selection must be driven by the
+# index, not by the futures contract: futures trade at a premium/discount to
+# spot (~50 points on 30-Jul-2026), which is enough to pick a strike one step
+# away from the true ATM.
+NIFTY_INDEX_SYMBOL = "nifty 50"
+NIFTY_INDEX_SEGMENT = "nse_cm"
+# Kotak's well-known token for the NIFTY 50 index, used only if the scrip
+# master lookup comes back empty (see resolve_nifty_index).
+NIFTY_INDEX_FALLBACK_TOKEN = "26000"
+
+STRIKE_STEP = 50
+
+
 @dataclass(frozen=True)
 class Instrument:
     token: str
     exchange_segment: str
     trading_symbol: str
     lot_size: int
-    expiry: dt.date
+    expiry: dt.date | None = None
 
 
 def _parse_expiry(value: str) -> dt.date:
@@ -59,8 +72,8 @@ def _to_instrument(record: dict) -> Instrument:
     )
 
 
-def _search_scrip(session: KotakSession, **kwargs) -> list[dict]:
-    response = session.call_with_retry("search_scrip", exchange_segment="nse_fo", **kwargs)
+def _search_scrip(session: KotakSession, exchange_segment: str = "nse_fo", **kwargs) -> list[dict]:
+    response = session.call_with_retry("search_scrip", exchange_segment=exchange_segment, **kwargs)
     if not isinstance(response, list):
         raise RuntimeError(f"Unexpected search_scrip() response: {response}")
     return response
@@ -91,17 +104,61 @@ def resolve_nifty_futures(session: KotakSession) -> Instrument:
     return min(candidates, key=lambda i: i.expiry)
 
 
+def resolve_nifty_index(session: KotakSession) -> Instrument:
+    """Resolves the NIFTY 50 spot index in the cash segment.
+
+    Cash-segment rows have no expiry or lot size, so only token/segment/symbol
+    are meaningful here. If the scrip master lookup returns nothing usable we
+    fall back to Kotak's well-known index token rather than failing the whole
+    startup, since the bot can still trade -- it just needs *a* spot feed.
+    """
+    try:
+        records = _search_scrip(session, exchange_segment=NIFTY_INDEX_SEGMENT, symbol=NIFTY_INDEX_SYMBOL)
+    except Exception:
+        logger.exception("search_scrip() for the NIFTY 50 index failed; falling back to token %s",
+                         NIFTY_INDEX_FALLBACK_TOKEN)
+        records = []
+
+    for record in records:
+        name = str(record.get("pTrdSymbol") or record.get("pSymbolName") or "").strip().upper()
+        if name.replace(" ", "") == "NIFTY50":
+            return Instrument(
+                token=str(record["pSymbol"]),
+                exchange_segment=str(record.get("pExchSeg", NIFTY_INDEX_SEGMENT)),
+                trading_symbol=name,
+                lot_size=0,
+            )
+
+    logger.warning(
+        "No exact NIFTY 50 row in the %s scrip master (%d rows searched); using fallback token %s",
+        NIFTY_INDEX_SEGMENT, len(records), NIFTY_INDEX_FALLBACK_TOKEN,
+    )
+    return Instrument(
+        token=NIFTY_INDEX_FALLBACK_TOKEN,
+        exchange_segment=NIFTY_INDEX_SEGMENT,
+        trading_symbol="NIFTY 50",
+        lot_size=0,
+    )
+
+
+def atm_strike(spot: float) -> int:
+    """ATM strike = NIFTY 50 *spot* rounded to the nearest 50."""
+    return int(round(spot / STRIKE_STEP) * STRIKE_STEP)
+
+
 def resolve_atm_option(session: KotakSession, underlying_ltp: float, option_type: str) -> Instrument:
     """Resolves the nearest-expiry ATM CE/PE for Nifty index options.
 
-    `option_type` must be "CE" or "PE". ATM strike = underlying_ltp rounded to
-    the nearest 50.
+    `option_type` must be "CE" or "PE". `underlying_ltp` must be the NIFTY 50
+    *index* level, not the futures price -- futures carry a premium over spot
+    (24315 vs 24264.05 on 30-Jul-2026) which is enough to select the wrong
+    strike, so main.py sources this from the index feed.
     """
     if option_type not in ("CE", "PE"):
         raise ValueError(f"option_type must be 'CE' or 'PE', got {option_type!r}")
 
-    atm_strike = round(underlying_ltp / 50) * 50
-    records = _search_scrip(session, symbol="nifty", option_type=option_type, strike_price=str(int(atm_strike)))
+    atm_strike_price = atm_strike(underlying_ltp)
+    records = _search_scrip(session, symbol="nifty", option_type=option_type, strike_price=str(atm_strike_price))
 
     today = dt.date.today()
     candidates = [
@@ -111,9 +168,12 @@ def resolve_atm_option(session: KotakSession, underlying_ltp: float, option_type
 
     if not candidates:
         raise RuntimeError(
-            f"No unexpired {option_type} contract found for Nifty strike {atm_strike}. "
+            f"No unexpired {option_type} contract found for Nifty strike {atm_strike_price}. "
             f"Sample record for debugging: {records[0] if records else None}"
         )
+    logger.info(
+        "ATM %s for NIFTY 50 spot %.2f -> strike %d", option_type, underlying_ltp, atm_strike_price
+    )
     return min(candidates, key=lambda i: i.expiry)
 
 
@@ -133,7 +193,9 @@ def fetch_ltp(session: KotakSession, instrument: Instrument) -> float:
     data = response.get("data", response) if isinstance(response, dict) else response
     if isinstance(data, list) and data:
         item = data[0]
-        for key in ("ltp", "last_traded_price", "lastPrice"):
+        # "iv"/"index_value" cover the cash-segment index quote, which reports
+        # an index level rather than a last traded price.
+        for key in ("ltp", "last_traded_price", "lastPrice", "iv", "index_value"):
             if key in item:
                 return float(item[key])
 

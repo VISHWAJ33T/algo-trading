@@ -1,14 +1,23 @@
 """Encodes the CE/PE entry and exit rules on top of the indicator functions.
 
-Entry/exit decisions are evaluated once per 5-min candle close. The strategy
-engine itself is stateless with respect to broker positions -- the caller
-(main.py) tells it whether a position is currently open and of what type via
-`open_option_type`, and execution.py is the single source of truth for actual
-broker/paper position state.
+Entry/exit decisions are evaluated once per 5-min candle close, on *closed*
+candles only -- the caller must not pass the still-forming candle in (see
+candles.TickAggregator.closed_candles). The strategy engine itself is stateless
+with respect to broker positions -- the caller (main.py) tells it whether a
+position is currently open and of what type via `open_option_type`, and
+execution.py is the single source of truth for actual broker/paper position
+state.
+
+Entry is a VWAP *cross*, not a VWAP *side*: a CE is taken on the candle that
+carries price from at/below VWAP to above it, and never while price is already
+parked above VWAP. Same, mirrored, for PE. Everything else (Force Index sign,
+both EMAs, market structure) is a filter on top of that trigger.
 
 Decision carries the full indicator snapshot (not just the action) so callers
 can log/persist *why* a decision was made, not just what it was -- this is
-what feeds the dashboard's live view and historical candle charts.
+what feeds the dashboard's live view and historical candle charts. `reason`
+names the specific condition that failed, so a "hold" on a candle that looked
+like a signal can be explained without re-deriving the indicators by hand.
 """
 from __future__ import annotations
 
@@ -44,6 +53,32 @@ class Decision:
     force_index: float | None = None
     structure_5m: str | None = None
     structure_30m: str | None = None
+    vwap_cross: Literal["up", "down"] | None = None
+
+
+def _vwap_cross(
+    candle: Candle, vwap_now: float, prev_close: float | None, vwap_prev: float | None
+) -> Literal["up", "down"] | None:
+    """Direction in which this candle crossed VWAP, or None if it stayed on
+    one side of it.
+
+    Two ways to cross, either of which counts: the candle's own body spans
+    VWAP (opened at/below, closed above), or the previous candle closed at/below
+    VWAP and this one closed above it -- the second case catches a gap straight
+    through VWAP, where the body never brackets it.
+    """
+    crossed_from_below = candle.open <= vwap_now or (
+        prev_close is not None and vwap_prev is not None and prev_close <= vwap_prev
+    )
+    if candle.close > vwap_now and crossed_from_below:
+        return "up"
+
+    crossed_from_above = candle.open >= vwap_now or (
+        prev_close is not None and vwap_prev is not None and prev_close >= vwap_prev
+    )
+    if candle.close < vwap_now and crossed_from_above:
+        return "down"
+    return None
 
 
 class StrategyEngine:
@@ -56,7 +91,8 @@ class StrategyEngine:
         if len(candles_5m) < 2:
             return Decision("hold", reason="not enough 5-min candles yet")
 
-        vwap_5m = vwap(_session_candles(candles_5m))
+        session = _session_candles(candles_5m)
+        vwap_5m = vwap(session)
         ema9_5m = ema_over_candles(candles_5m, 9)
         ema15_5m = ema_over_candles(candles_5m, 15)
         fi_5m = force_index_smoothed(candles_5m)
@@ -67,18 +103,23 @@ class StrategyEngine:
         if v is None or e9 is None or e15 is None or fi is None:
             return Decision("hold", reason="indicators still warming up")
 
-        close = candles_5m[-1].close
+        candle = candles_5m[-1]
+        close = candle.close
         structure_5m = swing_structure(candles_5m)
         structure_30m = swing_structure(candles_30m)
 
+        prev_close = session[-2].close if len(session) >= 2 else None
+        vwap_prev = vwap_5m[-2] if len(vwap_5m) >= 2 else None
+        cross = _vwap_cross(candle, v, prev_close, vwap_prev)
+
         snapshot = dict(
             close=close, vwap=v, ema9=e9, ema15=e15, force_index=fi,
-            structure_5m=structure_5m, structure_30m=structure_30m,
+            structure_5m=structure_5m, structure_30m=structure_30m, vwap_cross=cross,
         )
 
         if open_option_type is not None:
             return self._evaluate_exit(open_option_type, close, v, fi, snapshot)
-        return self._evaluate_entry(structure_5m, structure_30m, close, v, e9, e15, fi, snapshot)
+        return self._evaluate_entry(candle, v, e9, e15, fi, cross, structure_5m, structure_30m, snapshot)
 
     @staticmethod
     def _evaluate_exit(open_option_type: OptionType, close: float, v: float, fi: float, snapshot: dict) -> Decision:
@@ -92,27 +133,59 @@ class StrategyEngine:
 
     @staticmethod
     def _evaluate_entry(
-        structure_5m: str | None,
-        structure_30m: str | None,
-        close: float,
+        candle: Candle,
         v: float,
         e9: float,
         e15: float,
         fi: float,
+        cross: str | None,
+        structure_5m: str | None,
+        structure_30m: str | None,
         snapshot: dict,
     ) -> Decision:
-        ce_ok = (
-            close > v and fi > 0 and close > e9 and close > e15
-            and structure_5m == "HH_HL" and structure_30m == "HH_HL"
-        )
-        if ce_ok:
-            return Decision("enter", "CE", "VWAP/FI/EMA/HH-HL conditions met on 5m & 30m", **snapshot)
+        close = candle.close
 
-        pe_ok = (
-            close < v and fi < 0 and close < e9 and close < e15
-            and structure_5m == "LH_LL" and structure_30m == "LH_LL"
-        )
-        if pe_ok:
-            return Decision("enter", "PE", "VWAP/FI/EMA/LH-LL conditions met on 5m & 30m", **snapshot)
+        # The 30-min timeframe is computed and logged, but does not gate entry.
+        # It used to have to confirm the 5-min structure, which is what blocked
+        # the valid 12:25 signal on 30-Jul-2026: the 30-min chart was still
+        # carrying a lower low from that morning while the 5-min chart had
+        # already turned. The revised rule is 5-min only -- VWAP cross, Force
+        # Index sign, both EMAs, and 5-min structure.
+        ce_checks = {
+            "candle did not cross above VWAP": cross == "up",
+            "candle is not green": candle.close > candle.open,
+            "Force Index is not above zero": fi > 0,
+            "close is not above both EMA9 and EMA15": close > e9 and close > e15,
+            "5-min structure is not HH/HL": structure_5m == "HH_HL",
+        }
+        if all(ce_checks.values()):
+            return Decision("enter", "CE", "CE: green candle crossed above VWAP, FI>0, above EMA9/15, HH-HL", **snapshot)
 
-        return Decision("hold", reason="no entry conditions met", **snapshot)
+        pe_checks = {
+            "candle did not cross below VWAP": cross == "down",
+            "candle is not red": candle.close < candle.open,
+            "Force Index is not below zero": fi < 0,
+            "close is not below both EMA9 and EMA15": close < e9 and close < e15,
+            "5-min structure is not LH/LL": structure_5m == "LH_LL",
+        }
+        if all(pe_checks.values()):
+            return Decision("enter", "PE", "PE: red candle crossed below VWAP, FI<0, below EMA9/15, LH-LL", **snapshot)
+
+        return Decision("hold", reason=_hold_reason(ce_checks, pe_checks, cross, structure_5m), **snapshot)
+
+
+def _hold_reason(
+    ce_checks: dict[str, bool], pe_checks: dict[str, bool], cross: str | None, structure_5m: str | None
+) -> str:
+    """Names the conditions that actually blocked the entry, for the side the
+    candle was closest to taking, rather than a blanket "no entry conditions
+    met" that gives no way to check the bot against a chart."""
+    if cross == "up" or structure_5m == "HH_HL":
+        side, checks = "CE", ce_checks
+    elif cross == "down" or structure_5m == "LH_LL":
+        side, checks = "PE", pe_checks
+    else:
+        return "no VWAP cross on this candle"
+
+    failed = [name for name, ok in checks.items() if not ok]
+    return f"no {side} entry: " + "; ".join(failed)

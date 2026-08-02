@@ -8,6 +8,13 @@ from src.candles import Candle
 # Elder's classic Force Index smoothing period.
 FORCE_INDEX_EMA_PERIOD = 13
 
+# How many bars either side of a candle must be lower/higher for it to count as
+# a swing point. 1 = the ordinary 3-bar pivot a trader reads off a chart. It was
+# 2 originally, which lagged the visible structure by an extra bar and left long
+# stretches of the session with no confirmed structure at all (see
+# swing_structure).
+SWING_FRACTAL_WIDTH = 1
+
 
 def vwap(candles: list[Candle]) -> list[float | None]:
     """Session-cumulative VWAP (typical price weighted by volume), one value
@@ -63,10 +70,10 @@ def force_index_smoothed(candles: list[Candle], period: int = FORCE_INDEX_EMA_PE
     return result
 
 
-def find_swing_points(candles: list[Candle], n: int = 2) -> list[tuple[int, str, float]]:
-    """2-bar fractal swing points: a bar's high/low is confirmed as a swing
-    point only if it's the strict extreme among the `n` bars before and after
-    it. Returns (index, "high"|"low", price) in chronological order. The most
+def find_swing_points(candles: list[Candle], n: int = SWING_FRACTAL_WIDTH) -> list[tuple[int, str, float]]:
+    """Fractal swing points: a bar's high/low is confirmed as a swing point
+    only if it's the strict extreme among the `n` bars before and after it.
+    Returns (index, "high"|"low", price) in chronological order. The most
     recent `n` bars can never be confirmed yet -- that lag is intentional."""
     points: list[tuple[int, str, float]] = []
     for i in range(n, len(candles) - n):
@@ -80,20 +87,38 @@ def find_swing_points(candles: list[Candle], n: int = 2) -> list[tuple[int, str,
     return points
 
 
-def swing_structure(candles: list[Candle], n: int = 2) -> str | None:
-    """Returns "HH_HL", "LH_LL", or None (no confirmed directional
-    structure yet) based on the last two confirmed swing highs and lows."""
+def swing_structure(candles: list[Candle], n: int = SWING_FRACTAL_WIDTH) -> str | None:
+    """Returns "HH_HL" (up), "LH_LL" (down), or None (genuinely sideways /
+    not enough confirmed swings yet).
+
+    This used to demand a higher high *and* a higher low simultaneously, which
+    is stricter than how the structure is actually read off a chart: a trend is
+    up while price is *not making lower lows*, even if the last swing high
+    hasn't been taken out yet (a pullback inside an uptrend does exactly that).
+    On 30-Jul-2026 that strictness left the 30-min structure at None for the
+    whole session and blocked every valid entry.
+
+    So the rule is: up = making higher highs or higher lows, and not making
+    lower lows. Down is the mirror. When the two disagree (higher low but lower
+    high, i.e. a contracting range) the lows decide the direction, because
+    that's the "not making LL" test the strategy is written around.
+    """
     points = find_swing_points(candles, n)
-    highs = [p for p in points if p[1] == "high"]
-    lows = [p for p in points if p[1] == "low"]
-    if len(highs) < 2 or len(lows) < 2:
-        return None
+    highs = [p[2] for p in points if p[1] == "high"]
+    lows = [p[2] for p in points if p[1] == "low"]
 
-    last_high, prev_high = highs[-1][2], highs[-2][2]
-    last_low, prev_low = lows[-1][2], lows[-2][2]
+    higher_high = len(highs) >= 2 and highs[-1] > highs[-2]
+    lower_high = len(highs) >= 2 and highs[-1] < highs[-2]
+    higher_low = len(lows) >= 2 and lows[-1] > lows[-2]
+    lower_low = len(lows) >= 2 and lows[-1] < lows[-2]
 
-    if last_high > prev_high and last_low > prev_low:
+    up = (higher_high or higher_low) and not lower_low
+    down = (lower_high or lower_low) and not higher_high
+
+    if up and not down:
         return "HH_HL"
-    if last_high < prev_high and last_low < prev_low:
+    if down and not up:
         return "LH_LL"
+    if up and down:
+        return "HH_HL" if higher_low else "LH_LL" if lower_low else None
     return None

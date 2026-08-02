@@ -22,12 +22,15 @@ from dataclasses import dataclass
 from typing import Callable
 
 from src.auth import KotakSession
-from src.candles import Candle, TickAggregator
+from src.candles import Candle, TickAggregator, in_session
 from src.instruments import Instrument
 
 logger = logging.getLogger(__name__)
 
-_LTP_KEYS = ("ltp",)
+# Index subscriptions report the index level as "iv" rather than "ltp" (see
+# INDEX_MAPPING in the SDK's HSWebSocketLib), so both keys are accepted.
+_LTP_KEYS = ("ltp", "iv")
+_TOKEN_KEYS = ("tk",)
 _TIMESTAMP_KEYS = ("ltt",)
 _CUMULATIVE_VOLUME_KEYS = ("v",)
 _TRADE_QUANTITY_KEYS = ("ltq",)
@@ -83,17 +86,25 @@ def _to_float_or_none(value) -> float | None:
 
 
 class LiveFeed:
-    def __init__(self, session: KotakSession, instrument: Instrument):
+    """Candles are built from `instrument` (Nifty futures, which is what has a
+    tradeable volume series and therefore usable VWAP/Force Index). The spot
+    index is subscribed alongside it purely to keep `latest_index_ltp` current
+    for ATM strike selection -- it never feeds the candle aggregators."""
+
+    def __init__(self, session: KotakSession, instrument: Instrument, index_instrument: Instrument | None = None):
         self.session = session
         self.instrument = instrument
+        self.index_instrument = index_instrument
         self.agg_5m = TickAggregator(5)
         self.agg_30m = TickAggregator(30)
         self.latest_ltp: float | None = None
+        self.latest_index_ltp: float | None = None
 
         self.on_candle_close_5m: Callable[[Candle], None] | None = None
         self.on_candle_close_30m: Callable[[Candle], None] | None = None
 
         self._last_cumulative_volume: float | None = None
+        self._stopped = False
 
     def start(self) -> None:
         client = self.session.client or self.session.login()
@@ -109,8 +120,47 @@ class LiveFeed:
         )
         logger.info("Subscribed to live feed for %s", self.instrument.trading_symbol)
 
+        if self.index_instrument is not None:
+            client.subscribe(
+                instrument_tokens=[
+                    {
+                        "instrument_token": self.index_instrument.token,
+                        "exchange_segment": self.index_instrument.exchange_segment,
+                    }
+                ],
+                isIndex=True,
+            )
+            logger.info("Subscribed to spot index feed for %s", self.index_instrument.trading_symbol)
+
+    def stop(self) -> None:
+        """Stops consuming ticks and suppresses the reconnect loop. Without
+        this the feed kept reconnecting and aggregating for hours after the
+        close (30-Jul-2026 ran to 19:40 IST)."""
+        self._stopped = True
+        client = self.session.client
+        if client is None:
+            return
+        tokens = [{"instrument_token": self.instrument.token, "exchange_segment": self.instrument.exchange_segment}]
+        try:
+            client.un_subscribe(instrument_tokens=tokens, isIndex=False)
+            if self.index_instrument is not None:
+                client.un_subscribe(
+                    instrument_tokens=[
+                        {
+                            "instrument_token": self.index_instrument.token,
+                            "exchange_segment": self.index_instrument.exchange_segment,
+                        }
+                    ],
+                    isIndex=True,
+                )
+        except Exception:
+            logger.exception("Failed to unsubscribe cleanly from the live feed")
+        logger.info("Live feed stopped")
+
     def _on_message(self, message) -> None:
         logger.debug("Raw websocket message: %s", message)
+        if self._stopped:
+            return
         if not isinstance(message, dict) or message.get("type") != "stock_feed":
             return
 
@@ -132,7 +182,16 @@ class LiveFeed:
         if tick is None:
             return
 
+        if self._is_index_tick(raw_tick):
+            self.latest_index_ltp = tick.ltp
+            return
+
         self.latest_ltp = tick.ltp
+
+        # Post-close ticks (including the snapshot each reconnect replays) must
+        # not build candles -- see candles.in_session.
+        if not in_session(tick.timestamp):
+            return
 
         volume_delta = 0.0
         if tick.cumulative_volume is not None:
@@ -150,10 +209,19 @@ class LiveFeed:
         if closed_30m is not None and self.on_candle_close_30m is not None:
             self.on_candle_close_30m(closed_30m)
 
+    def _is_index_tick(self, raw_tick: dict) -> bool:
+        if self.index_instrument is None:
+            return False
+        token = _first(raw_tick, _TOKEN_KEYS)
+        return token is not None and str(token) == str(self.index_instrument.token)
+
     def _on_error(self, error) -> None:
         logger.error("Websocket error: %s", error)
 
     def _on_close(self, *args) -> None:
+        if self._stopped:
+            logger.info("Websocket closed after stop(); not reconnecting")
+            return
         logger.warning("Websocket closed; reconnecting in 2s")
         time.sleep(2)
         self.start()

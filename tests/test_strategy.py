@@ -15,8 +15,9 @@ def mc(i: int, o: float, h: float, l: float, c: float, v: float) -> Candle:
 
 def _hh_hl_series() -> list[Candle]:
     # Same zigzag used in test_indicators.py: confirmed HH_HL structure, and
-    # the final close sits above VWAP/EMA9/EMA15 with a positive smoothed
-    # Force Index (verified against the actual indicator functions).
+    # the final green candle carries price from below VWAP to above it, with a
+    # positive smoothed Force Index and a close above EMA9/EMA15 (verified
+    # against the actual indicator functions).
     highs = [10, 20, 30, 50, 21, 22, 23, 24, 25, 60, 27, 28, 29, 31, 32]
     lows = [5, 4, 3, 2, 1, 0, -50, 1, 2, 3, 4, 7, -40, 8, 9]
     return [mc(i, l, h, l, (h + l) / 2, 10) for i, (h, l) in enumerate(zip(highs, lows))]
@@ -33,18 +34,68 @@ def test_hold_while_indicators_are_warming_up():
     assert "warming up" in decision.reason
 
 
-def test_enters_ce_when_all_conditions_align_on_both_timeframes():
+def test_enters_ce_when_a_green_candle_crosses_above_vwap():
     engine = StrategyEngine()
     series = _hh_hl_series()
     decision = engine.evaluate(series, series, open_option_type=None)
     assert decision.action == "enter"
     assert decision.option_type == "CE"
+    assert decision.vwap_cross == "up"
 
 
-def test_holds_when_structure_only_confirmed_on_one_timeframe():
+def test_thirty_minute_structure_does_not_gate_entry():
+    # The 30-min chart is informational: it lagged the 5-min turn on
+    # 30-Jul-2026 and blocked a valid 12:25 entry when it was a hard gate.
     engine = StrategyEngine()
     decision = engine.evaluate(_hh_hl_series(), _flat_series(15), open_option_type=None)
+    assert decision.action == "enter"
+    assert decision.option_type == "CE"
+
+
+def test_holds_when_price_is_already_above_vwap():
+    # The 30-Jul-2026 13:45 and 15:10 entries: every other condition was met,
+    # but price was already parked above VWAP rather than crossing it.
+    engine = StrategyEngine()
+    series = _hh_hl_series() + [mc(15, 30, 36, 29, 34, 10)]
+    decision = engine.evaluate(series, series, open_option_type=None)
     assert decision.action == "hold"
+    assert "did not cross above VWAP" in decision.reason
+
+
+def test_holds_when_the_crossing_candle_is_not_green():
+    # Crosses VWAP on the gap path (previous candle closed below VWAP) but the
+    # candle itself is red, so it is not a CE trigger.
+    engine = StrategyEngine()
+    series = _hh_hl_series() + [mc(15, 6, 7, 4, 5, 10), mc(16, 40, 41, 29, 30, 10)]
+    decision = engine.evaluate(series, series, open_option_type=None)
+    assert decision.action == "hold"
+    assert decision.vwap_cross == "up"
+    assert "not green" in decision.reason
+
+
+def test_hold_reason_names_the_conditions_that_blocked_the_entry():
+    engine = StrategyEngine()
+    series = _hh_hl_series() + [mc(15, 30, 36, 29, 34, 10)]
+    decision = engine.evaluate(series, series, open_option_type=None)
+    assert decision.reason.startswith("no CE entry: ")
+
+
+def _pe_series() -> list[Candle]:
+    # _hh_hl_series with every price negated, which flips highs into lows and
+    # mirrors VWAP/EMA/Force Index with it: LH_LL structure, and the final red
+    # candle carries price from above VWAP to below it.
+    highs = [10, 20, 30, 50, 21, 22, 23, 24, 25, 60, 27, 28, 29, 31, 32]
+    lows = [5, 4, 3, 2, 1, 0, -50, 1, 2, 3, 4, 7, -40, 8, 9]
+    return [mc(i, -l, -l, -h, -(h + l) / 2, 10) for i, (h, l) in enumerate(zip(highs, lows))]
+
+
+def test_enters_pe_when_a_red_candle_crosses_below_vwap():
+    engine = StrategyEngine()
+    series = _pe_series()
+    decision = engine.evaluate(series, series, open_option_type=None)
+    assert decision.action == "enter"
+    assert decision.option_type == "PE"
+    assert decision.vwap_cross == "down"
 
 
 def test_exits_ce_on_vwap_and_force_index_breakdown():

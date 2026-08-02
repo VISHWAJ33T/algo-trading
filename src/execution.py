@@ -32,6 +32,9 @@ class OpenPosition:
     entry_price: float
     entry_time: dt.datetime
     trade_id: int
+    # NIFTY 50 spot at entry, so the "30 points of the underlying" target can
+    # be measured. None when the index feed hadn't printed yet at entry.
+    underlying_entry_price: float | None = None
 
 
 class OrderExecutor:
@@ -45,7 +48,13 @@ class OrderExecutor:
     def open_option_type(self) -> OptionType | None:
         return self.position.option_type if self.position else None
 
-    def enter(self, option_type: OptionType, instrument: Instrument, ltp: float) -> None:
+    def enter(
+        self,
+        option_type: OptionType,
+        instrument: Instrument,
+        ltp: float,
+        underlying_ltp: float | None = None,
+    ) -> None:
         can_enter, reason = self.risk.can_enter(has_open_position=self.position is not None)
         if not can_enter:
             logger.info("Skipping %s entry: %s", option_type, reason)
@@ -92,6 +101,7 @@ class OrderExecutor:
             entry_price=ltp,
             entry_time=entry_time,
             trade_id=trade_id,
+            underlying_entry_price=underlying_ltp,
         )
 
     def exit(self, ltp: float, reason: str) -> None:

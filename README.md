@@ -123,11 +123,19 @@ hand-built candle sequences -- no live connection required.
 
 ## Strategy rules encoded
 
-- **CE entry**: close > VWAP, smoothed Force Index > 0, close above EMA9 & EMA15,
-  confirmed HH-HL structure on both 5-min and 30-min.
-- **PE entry**: mirrored -- close < VWAP, smoothed Force Index < 0, close below
-  both EMAs, confirmed LH-LL structure on both timeframes.
+- **CE entry**: the closed 5-min candle *crosses above* VWAP (it came from at/below
+  VWAP and closed above it) and is green, smoothed Force Index > 0, close above
+  EMA9 & EMA15, and 5-min structure is HH-HL. No entry while price is already
+  sitting above VWAP.
+- **PE entry**: mirrored -- a red candle crosses below VWAP, smoothed Force Index
+  < 0, close below both EMAs, 5-min structure LH-LL.
 - **CE exit**: close < VWAP, or smoothed Force Index < 0.
 - **PE exit**: close > VWAP, or smoothed Force Index > 0.
-- Only one position open at a time; ATM strike is resolved by rounding the Nifty
-  Futures LTP to the nearest 50.
+- **Profit target**: 30 points of the underlying, or ~15 points of option premium,
+  whichever comes first (`TARGET_UNDERLYING_POINTS` / `TARGET_PREMIUM_POINTS`).
+  Checked continuously while a position is open, not only at candle closes.
+- The 30-min chart is recorded and charted for context but no longer gates entry.
+- Decisions are evaluated on **closed** candles only, and no new entry is taken
+  after the 15:20 square-off.
+- Only one position open at a time; ATM strike is resolved by rounding the
+  **NIFTY 50 spot index** (not the futures price) to the nearest 50.

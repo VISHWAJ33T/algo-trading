@@ -34,6 +34,13 @@ class Config:
     lot_size: int
     max_daily_loss: float | None
 
+    # Profit target. The strategy states it in underlying points (30 points of
+    # Nifty), which at an ATM delta of ~0.5 is worth ~15 points of premium;
+    # whichever is hit first closes the position. Either can be left blank to
+    # disable that half of the check.
+    target_underlying_points: float | None
+    target_premium_points: float | None
+
     log_level: str
 
 
@@ -64,5 +71,7 @@ def load_config() -> Config:
         live_trading=_bool(os.environ.get("LIVE_TRADING"), default=False),
         lot_size=int(os.environ.get("LOT_SIZE", "1")),
         max_daily_loss=_optional_float(os.environ.get("MAX_DAILY_LOSS")),
+        target_underlying_points=_optional_float(os.environ.get("TARGET_UNDERLYING_POINTS", "30")),
+        target_premium_points=_optional_float(os.environ.get("TARGET_PREMIUM_POINTS", "15")),
         log_level=os.environ.get("LOG_LEVEL", "INFO"),
     )

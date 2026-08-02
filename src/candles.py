@@ -32,6 +32,15 @@ def _session_anchor(timestamp: dt.datetime) -> dt.datetime:
     return local.replace(hour=SESSION_OPEN.hour, minute=SESSION_OPEN.minute, second=0, microsecond=0)
 
 
+def in_session(timestamp: dt.datetime) -> bool:
+    """True only during regular market hours in IST. Ticks outside these hours
+    (post-close snapshots, reconnect replays) must not build candles: on
+    30-Jul-2026 they produced a tail of flat zero-volume 5-min candles running
+    to 19:40 IST, which the strategy then evaluated as if it were live price
+    action."""
+    return SESSION_OPEN <= timestamp.astimezone(IST).time() < SESSION_CLOSE
+
+
 class TickAggregator:
     """Buckets ticks for one instrument into candles of a fixed interval."""
 
@@ -76,8 +85,16 @@ class TickAggregator:
         current.volume += volume_delta
         return None
 
+    def closed_candles(self) -> list[Candle]:
+        """Only fully closed candles, oldest first. This is what the strategy
+        must be evaluated on: `all_candles()` ends with a bar holding a single
+        tick, so evaluating on it judged each signal on the first print of the
+        *next* candle instead of the close of the one that just finished."""
+        return list(self.bars)
+
     def all_candles(self) -> list[Candle]:
-        """Closed candles plus the still-forming current one, oldest first."""
+        """Closed candles plus the still-forming current one, oldest first.
+        For display only -- see closed_candles() for anything that decides."""
         candles = list(self.bars)
         if self._current is not None:
             candles.append(self._current)
