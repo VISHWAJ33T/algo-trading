@@ -16,3 +16,6 @@ debug-logs/
 *.docx
 .~lock.*#
 tmp2/
+
+# Packaged handoffs
+*.zip
