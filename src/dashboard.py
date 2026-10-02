@@ -38,6 +38,17 @@ def _bot_is_live() -> bool:
     return abs(dt.datetime.now(dt.timezone.utc) - last_ts) < dt.timedelta(minutes=2)
 
 
+def _settled_trades(trades: list[dict]) -> list[dict]:
+    """Trades that actually closed at a known price.
+
+    Rows abandoned by storage.abandon_stale_open_trades carry an exit_time (so
+    they no longer read as open) but a NULL pnl, because the bot was not
+    running to square them off and no honest exit price exists. They must stay
+    out of every P&L and win-rate total.
+    """
+    return [t for t in trades if t["exit_time"] is not None and t["pnl"] is not None]
+
+
 def _row_to_candle(row: dict) -> Candle:
     return Candle(
         start=dt.datetime.fromisoformat(row["start_time"]),
@@ -103,14 +114,17 @@ def index():
 def api_today():
     session_date = request.args.get("date", _today_str())
 
-    open_trade = storage.get_open_trade()
+    # Scoped to the session being viewed: an unclosed row from an earlier day
+    # is not today's open position, which is how a 30-Jul trade was still being
+    # shown as open on 03-Aug.
+    open_trade = storage.get_open_trade(session_date)
     trades = storage.get_trades_for_date(session_date)
     decisions = storage.get_recent_decisions(session_date, limit=100)
     candles_5m, vwap_is_fallback = _with_indicators(
         storage.get_candles_for_date(session_date, timeframe="5m")
     )
 
-    closed_trades = [t for t in trades if t["exit_time"] is not None]
+    closed_trades = _settled_trades(trades)
     todays_pnl = sum(t["pnl"] for t in closed_trades)
 
     return jsonify({
@@ -134,7 +148,7 @@ def api_history():
 
     daily_summary = storage.get_daily_summary(start_date, end_date)
     trades = storage.get_trades_in_range(start_date, end_date)
-    closed_trades = [t for t in trades if t["exit_time"] is not None]
+    closed_trades = _settled_trades(trades)
 
     total_pnl = sum(t["pnl"] for t in closed_trades)
     wins = sum(1 for t in closed_trades if t["pnl"] > 0)

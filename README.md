@@ -90,11 +90,18 @@ two, something failed at startup (almost always incomplete `.env` credentials) -
 check `logs\bot.log`, which now always records a startup failure clearly, even
 though no window was ever shown.
 
+If the bot is stopped and restarted while a position is open, it picks that
+position back up on the next start and carries on managing it (profit target and
+end-of-day square-off included) rather than starting flat and opening a second
+one. It only does this for a position opened earlier the *same* day; anything
+left open by an older session is closed out in the records on startup and
+reported in the log.
+
 ## Dashboard (live status + historical analytics)
 
 Every candle, strategy decision, and trade the bot processes is saved to a local
 SQLite database (`data/bot.db`). A separate, read-only web dashboard lets you (or
-your client) view this in a browser -- today's live activity, and P&L analytics
+the trader) view this in a browser -- today's live activity, and P&L analytics
 across any date range:
 
 ```bash
@@ -110,7 +117,7 @@ itself is active; it only ever reads the database.
   (auto-refreshes every 8 seconds).
 - **History tab**: pick any date range to see a daily P&L bar chart, a cumulative
   equity curve, win rate, and the full trade list for that range -- this is how
-  your client can review "how did last month go" at a glance.
+  you can review "how did last month go" at a glance.
 
 ## Tests
 
@@ -139,3 +146,15 @@ hand-built candle sequences -- no live connection required.
   after the 15:20 square-off.
 - Only one position open at a time; ATM strike is resolved by rounding the
   **NIFTY 50 spot index** (not the futures price) to the nearest 50.
+
+## Disclaimer
+
+This software is provided for educational purposes only and is not financial
+advice. Trading derivatives involves substantial risk of loss. Keep
+`LIVE_TRADING=false` until you have validated the bot's behaviour yourself; you
+are solely responsible for any orders it places. Never commit your `.env` file --
+it holds your broker credentials and is git-ignored.
+
+## License
+
+Released under the [MIT License](LICENSE).

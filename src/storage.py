@@ -59,6 +59,26 @@ CREATE TABLE IF NOT EXISTS trades (
 CREATE INDEX IF NOT EXISTS idx_trades_lookup ON trades(session_date, entry_time);
 """
 
+# Columns added after the first release. SQLite can only add one column per
+# ALTER, and IF NOT EXISTS isn't supported for columns, so they are applied
+# individually against the live table definition (see _migrate).
+#
+# instrument_token/exchange_segment exist so an open position can be rebuilt
+# into a tradeable Instrument after a restart without re-resolving it from the
+# scrip master; underlying_entry_price so the "30 points of the underlying"
+# half of the profit target survives the same restart.
+_TRADE_COLUMN_MIGRATIONS = {
+    "instrument_token": "TEXT",
+    "exchange_segment": "TEXT",
+    "underlying_entry_price": "REAL",
+}
+
+# Written to exit_reason when a trade is closed out administratively because
+# the bot was not running to manage it (see abandon_stale_open_trades). Such
+# rows deliberately keep pnl NULL -- the exit price is genuinely unknown, and
+# inventing one would corrupt the win/loss statistics.
+ABANDONED_EXIT_REASON = "abandoned - bot was not running to close this trade"
+
 
 def get_connection() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -72,9 +92,19 @@ def init_db() -> None:
     conn = get_connection()
     try:
         conn.executescript(_SCHEMA)
+        _migrate(conn)
         conn.commit()
     finally:
         conn.close()
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Adds any columns missing from an existing trades table, so an upgrade
+    drops onto an existing bot.db without needing it recreated."""
+    existing = {row["name"] for row in conn.execute("PRAGMA table_info(trades)")}
+    for column, column_type in _TRADE_COLUMN_MIGRATIONS.items():
+        if column not in existing:
+            conn.execute(f"ALTER TABLE trades ADD COLUMN {column} {column_type}")
 
 
 def _session_date(timestamp: dt.datetime) -> str:
@@ -127,17 +157,21 @@ def save_decision(timestamp: dt.datetime, decision: Decision) -> None:
 def record_trade_entry(
     option_type: str, trading_symbol: str, quantity: int,
     entry_time: dt.datetime, entry_price: float, live_trading: bool,
+    instrument_token: str | None = None, exchange_segment: str | None = None,
+    underlying_entry_price: float | None = None,
 ) -> int:
     conn = get_connection()
     try:
         cursor = conn.execute(
             """INSERT INTO trades
                (session_date, option_type, trading_symbol, quantity, entry_time,
-                entry_price, live_trading)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                entry_price, live_trading, instrument_token, exchange_segment,
+                underlying_entry_price)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 _session_date(entry_time), option_type, trading_symbol, quantity,
                 entry_time.isoformat(), entry_price, int(live_trading),
+                instrument_token, exchange_segment, underlying_entry_price,
             ),
         )
         conn.commit()
@@ -159,13 +193,60 @@ def record_trade_exit(trade_id: int, exit_time: dt.datetime, exit_price: float, 
         conn.close()
 
 
-def get_open_trade() -> dict | None:
+def get_open_trade(session_date: str | None = None) -> dict | None:
+    """The most recent trade with no exit recorded. Pass `session_date` to
+    restrict it to one session -- without that, an orphaned row from a previous
+    day is reported as today's open position (which is how a 30-Jul trade was
+    still showing as open on 03-Aug)."""
+    conn = get_connection()
+    try:
+        if session_date is None:
+            row = conn.execute(
+                "SELECT * FROM trades WHERE exit_time IS NULL ORDER BY entry_time DESC LIMIT 1"
+            ).fetchone()
+        else:
+            row = conn.execute(
+                """SELECT * FROM trades WHERE exit_time IS NULL AND session_date = ?
+                   ORDER BY entry_time DESC LIMIT 1""",
+                (session_date,),
+            ).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def abandon_stale_open_trades(before_session_date: str) -> int:
+    """Closes out open trades left behind by earlier sessions, returning how
+    many were affected.
+
+    `exit_time` is set so they stop being reported as open, but `exit_price`
+    and `pnl` stay NULL: the position was never actually squared off by the
+    bot, so any number put there would be fabricated. Callers that aggregate
+    P&L must therefore skip rows with a NULL pnl.
+    """
+    conn = get_connection()
+    try:
+        cursor = conn.execute(
+            """UPDATE trades SET exit_time = entry_time, exit_reason = ?
+               WHERE exit_time IS NULL AND session_date < ?""",
+            (ABANDONED_EXIT_REASON, before_session_date),
+        )
+        conn.commit()
+        return cursor.rowcount
+    finally:
+        conn.close()
+
+
+def get_realized_pnl(session_date: str) -> float:
+    """Total realised P&L booked for a session, so the daily-loss limit is
+    still enforced correctly after the bot is restarted mid-session."""
     conn = get_connection()
     try:
         row = conn.execute(
-            "SELECT * FROM trades WHERE exit_time IS NULL ORDER BY entry_time DESC LIMIT 1"
+            "SELECT COALESCE(SUM(pnl), 0.0) FROM trades WHERE session_date = ? AND pnl IS NOT NULL",
+            (session_date,),
         ).fetchone()
-        return dict(row) if row else None
+        return float(row[0])
     finally:
         conn.close()
 
@@ -257,6 +338,7 @@ def get_daily_summary(start_date: str, end_date: str) -> list[dict]:
                       COALESCE(SUM(pnl), 0) AS total_pnl
                FROM trades
                WHERE session_date BETWEEN ? AND ? AND exit_time IS NOT NULL
+                     AND pnl IS NOT NULL
                GROUP BY session_date
                ORDER BY session_date""",
             (start_date, end_date),
